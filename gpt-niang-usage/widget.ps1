@@ -102,13 +102,17 @@ $script:designWidth=[double]$script:window.FindName('AnimationStage').Width
 $script:designHeight=[double]$script:window.FindName('AnimationStage').Height
 $script:ui=@{}
 foreach($name in @('Root','Bubble','Tail','TailNear','SceneText','QuotaText','QuoteText','BubbleShape','Girl','PressScale','FacingScale','TextFacingScale','Header','Refresh','MenuButton','Status','LiveDot','ShortRow','WeekRow','ShortLabel','WeekLabel','ShortUsed','ShortLeft','ShortReset','ShortBar','WeekUsed','WeekLeft','WeekReset','WeekBar')){$script:ui[$name]=$script:window.FindName($name)}
-$bitmap=New-Object Windows.Media.Imaging.BitmapImage
-$bitmap.BeginInit();$bitmap.CacheOption=[Windows.Media.Imaging.BitmapCacheOption]::OnLoad
-$bitmap.UriSource=[Uri](Join-Path $script:appDir 'assets\gpt-dragon-niang-bust.png');$bitmap.EndInit();$bitmap.Freeze()
-$script:ui.Girl.Source=$bitmap
-$script:alphaBitmap=New-Object Windows.Media.Imaging.FormatConvertedBitmap($bitmap,[Windows.Media.PixelFormats]::Bgra32,$null,0)
-$script:alphaStride=$bitmap.PixelWidth*4;$script:alphaPixels=New-Object byte[] ($script:alphaStride*$bitmap.PixelHeight)
-$script:alphaBitmap.CopyPixels($script:alphaPixels,$script:alphaStride,0)
+$bitmap=$null;$script:alphaPixels=$null
+$imagePath=Join-Path $script:appDir 'assets\gpt-dragon-niang-bust.png'
+if(Test-Path -LiteralPath $imagePath){
+  $bitmap=New-Object Windows.Media.Imaging.BitmapImage
+  $bitmap.BeginInit();$bitmap.CacheOption=[Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+  $bitmap.UriSource=[Uri]$imagePath;$bitmap.EndInit();$bitmap.Freeze()
+  $script:ui.Girl.Source=$bitmap
+  $script:alphaBitmap=New-Object Windows.Media.Imaging.FormatConvertedBitmap($bitmap,[Windows.Media.PixelFormats]::Bgra32,$null,0)
+  $script:alphaStride=$bitmap.PixelWidth*4;$script:alphaPixels=New-Object byte[] ($script:alphaStride*$bitmap.PixelHeight)
+  $script:alphaBitmap.CopyPixels($script:alphaPixels,$script:alphaStride,0)
+}
 $script:status=$null
 $script:statusStamp=0
 $script:offsetRight=0.0;$script:offsetBottom=0.0;$script:offsetLeft=$null;$script:anchor='right';$script:side='right';$script:scale=1.0;$script:collapsed=$true
@@ -420,6 +424,7 @@ function Set-MenuVisible([bool]$show){
   $script:ui.MenuButton.Opacity=if($show){1}else{0};$script:ui.MenuButton.IsHitTestVisible=$show
 }
 function Test-GirlAlpha([Windows.Point]$rootPoint){
+  if(!$bitmap -or !$script:alphaPixels){return $false}
   $point=$script:ui.Root.TranslatePoint($rootPoint,$script:ui.Girl)
   $fit=[Math]::Max($script:ui.Girl.ActualWidth/$bitmap.PixelWidth,$script:ui.Girl.ActualHeight/$bitmap.PixelHeight)
   if($fit-le 0){return $false}
@@ -537,7 +542,7 @@ function Update-Quota {
   if($script:widgetColors){Update-WidgetColorScene}
 }
 Set-Appearance;Set-BubbleState;Initialize-WidgetColors;Update-Quota
-if($CheckOnly){$hostWindow=[GptWidgetNative]::FindCodex();$foregroundWindow=[GptWidgetNative]::GetAncestor([GptWidgetNative]::GetForegroundWindow(),2);@{ok=$true;imageLoaded=$bitmap.PixelWidth-gt 0;host=$hostWindow.ToInt64();hostTitle=[GptWidgetNative]::Title($hostWindow);foreground=$foregroundWindow.ToInt64();foregroundTitle=[GptWidgetNative]::Title($foregroundWindow);dataDir=$script:dataDir}|ConvertTo-Json;return}
+if($CheckOnly){$hostWindow=[GptWidgetNative]::FindCodex();$foregroundWindow=[GptWidgetNative]::GetAncestor([GptWidgetNative]::GetForegroundWindow(),2);@{ok=$true;imageLoaded=($null-ne $bitmap -and $bitmap.PixelWidth-gt 0);host=$hostWindow.ToInt64();hostTitle=[GptWidgetNative]::Title($hostWindow);foreground=$foregroundWindow.ToInt64();foregroundTitle=[GptWidgetNative]::Title($foregroundWindow);dataDir=$script:dataDir}|ConvertTo-Json;return}
 if($Preview){
   $script:collapsed=$false;Set-Appearance;Set-BubbleState;Apply-Scene
   $script:ui.Root.LayoutTransform=[Windows.Media.Transform]::Identity

@@ -21,7 +21,6 @@ tracked = subprocess.check_output(
 files = sorted(p for p in tracked if p and not p.startswith((".github/", "scripts/", ".codex/", "macos/", "script/")))
 required = {
     "LICENSE", "gpt-niang-usage/LICENSE",
-    "gpt-niang-usage/assets/CHARACTER-NOTICE.txt",
     ".agents/plugins/marketplace.json", manifest_path,
     "安装GPT娘.cmd", "停用GPT娘.cmd", "打开GPT娘.cmd",
     "检测套餐.cmd", "gpt-niang-usage/Detect-Plan.ps1",
@@ -39,7 +38,6 @@ required = {
     "gpt-niang-usage/runtime/install-files.json",
     "gpt-niang-usage/runtime/agent-launch.vbs",
     "gpt-niang-usage/runtime/agent-supervisor.vbs",
-    "gpt-niang-usage/assets/gpt-dragon-niang-bust.png",
 }
 if not required.issubset(files):
     raise SystemExit("Required runtime files missing from the bundle")

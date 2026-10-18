@@ -15,9 +15,7 @@
                       "defaultPrompt":  [
                                             "让 GPT 娘反馈当前额度用量"
                                         ],
-                      "brandColor":  "#9B86C1",
-                      "composerIcon":  "./assets/gpt-dragon-niang-bust.png",
-                      "logo":  "./assets/gpt-dragon-niang-bust.png"
+                      "brandColor":  "#9B86C1"
                   },
     "license":  "MIT",
     "keywords":  [

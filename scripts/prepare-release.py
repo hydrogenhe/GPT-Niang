@@ -30,7 +30,7 @@ for name in [windows, macos]:
             if info['CFBundleShortVersionString'] != version or info['CFBundleVersion'] != version:
                 raise SystemExit('Mac archive version differs')
             required = ['Contents/MacOS/GPTNiangMac', 'Contents/Helpers/GPTNiangUpdater', 'Contents/Resources/Backend/runtime/refresh-client.mjs',
-                        'Contents/Resources/Backend/runtime/thread-speed.mjs', 'Contents/Resources/gpt-dragon-niang-bust.png']
+                        'Contents/Resources/Backend/runtime/thread-speed.mjs']
             if any('GPTNiangMac.app/' + entry not in archive.namelist() for entry in required):
                 raise SystemExit('Mac archive is missing runtime resources')
             for locale in ['zh-hans', 'zh-hant']:
