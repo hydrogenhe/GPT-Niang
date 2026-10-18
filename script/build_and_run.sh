@@ -7,11 +7,14 @@ APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME.app"
 case "$MODE" in run|--verify|--debug|--logs|--telemetry|--build-only) ;; *) echo "Usage: $0 [--build-only|--verify|--debug|--logs|--telemetry]" >&2; exit 2 ;; esac
 if [ "$MODE" != --build-only ]; then pkill -x "$APP_NAME" >/dev/null 2>&1 || true; fi
 TASK_CACHE="${GPT_NIANG_BUILD_CACHE:-$ROOT_DIR/macos/.build-cache}"
+# Swift module caches contain absolute paths. Keep both SwiftPM build products
+# and module caches separate for each checkout location after a project move.
+CACHE_KEY="$(printf '%s' "$ROOT_DIR" | /usr/bin/cksum | /usr/bin/awk '{print $1}')"
+TASK_CACHE="$TASK_CACHE/checkouts/$CACHE_KEY"
 mkdir -p "$TASK_CACHE/clang" "$TASK_CACHE/swiftpm"
 export CLANG_MODULE_CACHE_PATH="$TASK_CACHE/clang"
 export SWIFTPM_MODULECACHE_OVERRIDE="$TASK_CACHE/clang"
-BUILD_ARGS=(--package-path "$ROOT_DIR/macos" --disable-sandbox --cache-path "$TASK_CACHE/swiftpm" --configuration "${GPT_NIANG_BUILD_CONFIGURATION:-debug}")
-if [ "${GPT_NIANG_BUILD_UNIVERSAL:-0}" = 1 ]; then BUILD_ARGS+=(--arch arm64 --arch x86_64); fi
+BUILD_ARGS=(--package-path "$ROOT_DIR/macos" --disable-sandbox --scratch-path "$TASK_CACHE/build" --cache-path "$TASK_CACHE/swiftpm" --configuration "${GPT_NIANG_BUILD_CONFIGURATION:-debug}")
 # Xcode 27's SwiftUI declares @State as a macro whose plugin ships only with full
 # Xcode. Building against an SDK that still exposes the property-wrapper form keeps
 # CommandLineTools-only machines working; deployment target is unchanged.
@@ -20,21 +23,39 @@ if [ -n "${GPT_NIANG_SDK:-}" ]; then
 fi
 VERSION="$(node -p "require(process.argv[1]).version" "$ROOT_DIR/gpt-niang-usage/package.json")"
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "Invalid version" >&2; exit 1; fi
-swift build "${BUILD_ARGS[@]}"
-BIN_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
+if [ "${GPT_NIANG_BUILD_UNIVERSAL:-0}" = 1 ]; then
+  # Build separately so Command Line Tools can produce a universal app without Xcode.
+  swift build "${BUILD_ARGS[@]}" --arch arm64
+  swift build "${BUILD_ARGS[@]}" --arch x86_64
+  BIN_DIR="$(swift build "${BUILD_ARGS[@]}" --arch arm64 --show-bin-path)"
+  INTEL_BIN_DIR="$(swift build "${BUILD_ARGS[@]}" --arch x86_64 --show-bin-path)"
+else
+  swift build "${BUILD_ARGS[@]}"
+  BIN_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
+fi
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Helpers" "$APP_BUNDLE/Contents/Resources/Backend/runtime" "$APP_BUNDLE/Contents/Resources/Backend/.codex-plugin"
 cp "$BIN_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 cp -R "$BIN_DIR/GPTNiangMac_GPTNiangCore.bundle" "$APP_BUNDLE/Contents/Resources/"
 cp "$BIN_DIR/GPTNiangUpdater" "$APP_BUNDLE/Contents/Helpers/GPTNiangUpdater"
+if [ "${GPT_NIANG_BUILD_UNIVERSAL:-0}" = 1 ]; then
+  /usr/bin/lipo -create "$BIN_DIR/$APP_NAME" "$INTEL_BIN_DIR/$APP_NAME" -output "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+  /usr/bin/lipo -create "$BIN_DIR/GPTNiangUpdater" "$INTEL_BIN_DIR/GPTNiangUpdater" -output "$APP_BUNDLE/Contents/Helpers/GPTNiangUpdater"
+fi
 for runtime in "$ROOT_DIR/gpt-niang-usage/runtime/"*.mjs; do
   if [ "$(basename "$runtime")" != update.mjs ]; then cp "$runtime" "$APP_BUNDLE/Contents/Resources/Backend/runtime/"; fi
 done
 cp "$ROOT_DIR/gpt-niang-usage/.codex-plugin/plugin.json" "$APP_BUNDLE/Contents/Resources/Backend/.codex-plugin/"
 cp "$ROOT_DIR/gpt-niang-usage/assets/press.wav" "$ROOT_DIR/gpt-niang-usage/assets/release.wav" "$ROOT_DIR/gpt-niang-usage/assets/quotes.json" "$APP_BUNDLE/Contents/Resources/"
 if [ -f "$ROOT_DIR/gpt-niang-usage/assets/gpt-dragon-niang-bust.png" ]; then cp "$ROOT_DIR/gpt-niang-usage/assets/gpt-dragon-niang-bust.png" "$APP_BUNDLE/Contents/Resources/"; fi
+if [ -f "$ROOT_DIR/gpt-niang-usage/assets/gpt-dragon-niang-bust-blink.png" ]; then cp "$ROOT_DIR/gpt-niang-usage/assets/gpt-dragon-niang-bust-blink.png" "$APP_BUNDLE/Contents/Resources/"; fi
 cp "$ROOT_DIR/LICENSE" "$APP_BUNDLE/Contents/Resources/LICENSE"
 cp "$ROOT_DIR/gpt-niang-usage/assets/quotes-LICENSE.txt" "$APP_BUNDLE/Contents/Resources/quotes-LICENSE.txt"
+ICON_PLIST=""
+if [ -f "$ROOT_DIR/gpt-niang-usage/assets/gpt-dragon-niang-bust.png" ]; then
+  bash "$ROOT_DIR/script/build_icon.sh" "$ROOT_DIR/gpt-niang-usage/assets/gpt-dragon-niang-bust.png" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+  ICON_PLIST='<key>CFBundleIconFile</key><string>AppIcon.icns</string>'
+fi
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -43,6 +64,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <key>CFBundleIdentifier</key><string>com.hydrogenhe.GPTNiangMac</string>
 <key>CFBundleName</key><string>GPT 娘</string>
 <key>CFBundleDisplayName</key><string>GPT 娘</string>
+$ICON_PLIST
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>$VERSION</string>
 <key>CFBundleVersion</key><string>$VERSION</string>

@@ -13,7 +13,7 @@ export function sampleInterval(previous, next) {
   return {outputTokens, seconds, tokensPerSecond: outputTokens / seconds, at: next.at};
 }
 export class RolloutCounters {
-  constructor() { this.previous = null; this.latest = null; this.state = 'unknown'; this.lastAt = null; this.progress = null; }
+  constructor() { this.previous = null; this.latest = null; this.state = 'unknown'; this.lastAt = null; this.progress = null; this.usageTotal = null; this.turnStartTotal = null; this.turnTokens = null; this.turnStartedAt = null; this.turnFinishedAt = null; }
   accept(record) {
     if (record?.type !== 'event_msg') return;
     const event = record.payload;
@@ -22,10 +22,12 @@ export class RolloutCounters {
     if (event?.type === 'task_started') {
       // Never include human idle time between turns in the next sample.
       this.previous = this.previous ? {...this.previous, at} : null;
-      this.latest = null; this.state = 'running'; this.lastAt = at; this.progress = null; return;
+      this.latest = null; this.state = 'running'; this.lastAt = at; this.progress = null;
+      this.turnStartTotal = this.usageTotal; this.turnTokens = null;
+      this.turnStartedAt = at; this.turnFinishedAt = null; return;
     }
-    if (event?.type === 'task_complete') { this.state = 'completed'; this.lastAt = at; return; }
-    if (event?.type === 'turn_aborted') { this.state = 'aborted'; this.lastAt = at; return; }
+    if (event?.type === 'task_complete') { this.state = 'completed'; this.lastAt = at; this.turnFinishedAt = at; this.updateTurnTokens(); return; }
+    if (event?.type === 'turn_aborted') { this.state = 'aborted'; this.lastAt = at; this.turnFinishedAt = at; this.updateTurnTokens(); return; }
     if (event?.type === 'item_completed') {
       const item = event.item;
       if (item?.type === 'AgentMessage' && item.phase === 'commentary' && Array.isArray(item.content)) {
@@ -36,12 +38,29 @@ export class RolloutCounters {
       return;
     }
     if (event?.type !== 'token_count') return;
+    const usage = event.info?.total_token_usage;
+    const nextUsageTotal = Number.isSafeInteger(usage?.total_tokens) && usage.total_tokens >= 0 ? usage.total_tokens :
+      Number.isSafeInteger(usage?.input_tokens) && usage.input_tokens >= 0 && Number.isSafeInteger(usage?.output_tokens) && usage.output_tokens >= 0 ? usage.input_tokens + usage.output_tokens : null;
+    if (nextUsageTotal !== null) {
+      const counterReset = Number.isSafeInteger(this.usageTotal) && nextUsageTotal < this.usageTotal;
+      this.usageTotal = nextUsageTotal;
+      // A reset loses part of this turn, so a full-turn count is unavailable.
+      if (counterReset && ['running', 'completed', 'aborted'].includes(this.state)) {
+        this.turnStartTotal = null; this.turnTokens = null;
+      }
+    }
+    if (this.state === 'completed') this.updateTurnTokens();
     const outputTokens = event.info?.total_token_usage?.output_tokens;
     if (!Number.isSafeInteger(outputTokens) || outputTokens < 0) return;
     if (this.previous?.outputTokens === outputTokens) return; // duplicate quota-only updates
     const next = {at, outputTokens};
     this.latest = sampleInterval(this.previous, next);
     this.previous = next; this.lastAt = at;
+  }
+  updateTurnTokens() {
+    if (Number.isSafeInteger(this.usageTotal) && Number.isSafeInteger(this.turnStartTotal)) {
+      this.turnTokens = Math.max(0, this.usageTotal - this.turnStartTotal);
+    }
   }
 }
 export class RolloutTail {
@@ -96,16 +115,27 @@ function run() {
         {encoding: 'utf8', timeout: 2000, maxBuffer: 256 * 1024});
       if (result.status !== 0) throw new Error('本機聊天索引暫時無法讀取');
       const rows = JSON.parse(result.stdout || '[]');
+      const catalogPath = path.join(codexHome, 'sqlite', 'codex-dev.db');
+      const catalogResult = fs.existsSync(catalogPath) ? spawnSync('/usr/bin/sqlite3', ['-readonly', '-json', catalogPath,
+        "SELECT thread_id AS id,display_title AS title FROM local_thread_catalog WHERE host_id='local';"],
+        {encoding: 'utf8', timeout: 2000, maxBuffer: 512 * 1024}) : null;
+      const displayTitles = new Map();
+      if (catalogResult?.status === 0) {
+        for (const row of JSON.parse(catalogResult.stdout || '[]')) {
+          if (typeof row.id === 'string' && typeof row.title === 'string' && row.title.trim()) displayTitles.set(row.id, row.title.trim());
+        }
+      }
       const active = new Set();
       const threads = rows.map(row => {
         const file = allowedRollout(row.rollout_path, codexHome);
-        const output = {id: row.id, title: String(row.title || '未命名聊天').slice(0, 160), tokensPerSecond: null, sampleAt: null, state: 'unavailable'};
+        const output = {id: row.id, title: String(displayTitles.get(row.id) || row.title || '未命名聊天').slice(0, 160), tokensPerSecond: null, sampleAt: null, state: 'unavailable'};
         if (!file) return output;
         active.add(file);
         try {
           if (!tails.has(file)) tails.set(file, new RolloutTail(file));
           const counters = tails.get(file).update();
-          return {...output, state: counters.state, progress: counters.progress, sampleAt: counters.latest?.at ?? null,
+          return {...output, state: counters.state, progress: counters.progress, turnTokens: counters.turnTokens,
+            turnStartedAt: counters.turnStartedAt, turnFinishedAt: counters.turnFinishedAt, sampleAt: counters.latest?.at ?? null,
             tokensPerSecond: counters.latest?.tokensPerSecond ?? null,
             outputTokens: counters.latest?.outputTokens ?? null, intervalSeconds: counters.latest?.seconds ?? null};
         } catch { return output; }

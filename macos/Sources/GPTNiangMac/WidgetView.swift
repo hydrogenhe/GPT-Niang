@@ -17,8 +17,10 @@ struct WidgetView: View {
     @State private var displayedMessage: String?
     @State private var animationGeneration = 0
     @State private var sceneGeneration = 0
-    @State private var hovering = false
     @State private var frozenPhase: Double = 0
+    @State private var idlePose = false
+    @State private var blinking = false
+    @State private var idleAnimationTask: Task<Void, Never>?
     private let ink = Color(hex: "745A98")
     private let ease = Animation.timingCurve(0.25, 0.1, 0.25, 1, duration: 0.2)
     private let rebound = Animation.timingCurve(0.34, 1.56, 0.64, 1, duration: 0.22)
@@ -30,7 +32,12 @@ struct WidgetView: View {
         }
         .frame(width: 378 * model.displayScale, height: 378 * model.displayScale, alignment: .topLeading)
         .environment(\.colorScheme, .light)
-        .onAppear { animateBubble(model.bubble); displayedMessage = model.message }
+        .onAppear { animateBubble(model.bubble); displayedMessage = model.message; startIdleAnimation() }
+        .onDisappear { idleAnimationTask?.cancel(); idleAnimationTask = nil }
+        .onChange(of: reduceMotion) { value in
+            if value { idleAnimationTask?.cancel(); idleAnimationTask = nil; idlePose = false; blinking = false }
+            else { startIdleAnimation() }
+        }
         .onChange(of: model.colorPaused) { paused in
             if paused { frozenPhase = Date().timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 2.6) / 2.6 }
         }
@@ -65,19 +72,19 @@ struct WidgetView: View {
                 .overlay(OriginalBubbleShape().stroke(style("accent", phase: phase), lineWidth: 4))
                 .frame(width: 350, height: 239)
                 .scaleEffect(0.7 + 0.3 * cloud, anchor: UnitPoint(x: 0.4425, y: 0.36)).opacity(cloud)
-                .contentShape(OriginalBubbleShape()).onTapGesture { model.clickBubble() }
+                .contentShape(OriginalBubbleShape()).onTapGesture { model.clickTaskBubble() }
                 .allowsHitTesting(model.bubble)
             Ellipse().fill(style("surface", phase: phase)).overlay(Ellipse().stroke(style("accent", phase: phase), lineWidth: 4))
                 .frame(width: 25, height: 18).scaleEffect(0.7 + 0.3 * tail).opacity(tail)
-                .offset(x: 108, y: 182).onTapGesture { model.clickBubble() }.allowsHitTesting(model.bubble)
+                .offset(x: 108, y: 182).onTapGesture { model.clickTaskBubble() }.allowsHitTesting(model.bubble)
             Ellipse().fill(style("surface", phase: phase)).overlay(Ellipse().stroke(style("accent", phase: phase), lineWidth: 4))
                 .frame(width: 17, height: 12).scaleEffect(0.7 + 0.3 * near).opacity(near)
-                .offset(x: 142, y: 214).onTapGesture { model.clickBubble() }.allowsHitTesting(model.bubble)
+                .offset(x: 142, y: 214).onTapGesture { model.clickTaskBubble() }.allowsHitTesting(model.bubble)
             scene(now: date, phase: phase)
                 .frame(width: displayedMessage == nil && model.taskTitle == nil ? 184 : 218, height: displayedMessage == nil && model.taskTitle == nil ? 115 : 126)
                 .scaleEffect(x: mirrored ? -1 : 1, y: 1)
                 .opacity(text).offset(x: displayedMessage == nil && model.taskTitle == nil ? 63 : 46, y: 22)
-                .allowsHitTesting(model.bubble).contentShape(Rectangle()).onTapGesture { model.clickBubble() }
+                .allowsHitTesting(model.bubble).contentShape(Rectangle()).onTapGesture { model.clickTaskBubble() }
             if model.bubble && displayedMessage == nil && model.taskTitle == nil {
                 Button { model.refresh(renewBubble: true) } label: { Image(systemName: model.refreshing ? "hourglass" : "arrow.clockwise").font(.system(size: 12)).foregroundStyle(style("ink", phase: phase)) }
                     .buttonStyle(.plain).disabled(model.refreshing).frame(width: 20, height: 20)
@@ -85,7 +92,7 @@ struct WidgetView: View {
                     .help(model.text("立即刷新額度")).accessibilityLabel(model.text("刷新額度"))
             }
             if let image = model.characterImage {
-                let girl = Image(nsImage: image).resizable().interpolation(.high).scaledToFill().frame(width: 208, height: 208)
+                let girl = Image(nsImage: blinking ? (model.blinkImage ?? image) : image).resizable().interpolation(.high).scaledToFill().frame(width: 208, height: 208)
                 ZStack {
                     if model.colorScope == .full { Rectangle().fill(style("accent", phase: phase)).mask(girl).opacity(0.62).blur(radius: 7) }
                     girl
@@ -100,13 +107,24 @@ struct WidgetView: View {
                     onDrag(translation)
                     if translation == .zero { model.savePreferences() }
                 }, onClick: { model.characterClick() }, onMenu: onContextMenu))
-                .onHover { hovering = $0 }.offset(x: 142, y: 142)
+                .scaleEffect(y: idlePose ? 1.012 : 1, anchor: .bottom)
+                .rotationEffect(.degrees(idlePose ? 0.65 : -0.45), anchor: .bottom)
+                .offset(y: idlePose ? -1.2 : 0)
+                .animation(reduceMotion ? nil : .easeInOut(duration: 1.9), value: idlePose)
+                .offset(x: 142, y: 142)
                 .accessibilityElement().accessibilityLabel(model.text("GPT 娘：點擊查看額度，拖動調整位置"))
                 .accessibilityAddTraits(.isButton).accessibilityAction { model.characterClick() }
             }
-            if hovering && !model.hideMenu {
-                Button(action: onSettings) { Image(systemName: "line.3.horizontal").font(.system(size: 15)).foregroundStyle(ink).frame(width: 24, height: 24).background(Color(hex: "EDE7F6"), in: RoundedRectangle(cornerRadius: 6)) }
-                    .buttonStyle(.plain).scaleEffect(x: mirrored ? -1 : 1, y: 1).offset(x: 320, y: 162)
+            if !model.hideMenu {
+                Button(action: onSettings) {
+                    Image(systemName: "line.3.horizontal")
+                        .font(.system(size: 15)).foregroundStyle(ink)
+                        .frame(width: 24, height: 24)
+                        .background(Color(hex: "EDE7F6"), in: RoundedRectangle(cornerRadius: 6))
+                        .frame(width: 32, height: 32).contentShape(Rectangle())
+                }
+                    .buttonStyle(.plain).scaleEffect(x: mirrored ? -1 : 1, y: 1).offset(x: 316, y: 158)
+                    .zIndex(1)
                     .help(model.text("掛件設定")).accessibilityLabel(model.text("掛件設定"))
             }
         }
@@ -115,9 +133,28 @@ struct WidgetView: View {
         .scaleEffect(x: mirrored ? -1 : 1, y: 1, anchor: .bottom)
         .padding(14).scaleEffect(model.displayScale, anchor: .topLeading)
     }
+    private func startIdleAnimation() {
+        guard !reduceMotion, idleAnimationTask == nil else { return }
+        idleAnimationTask = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2.0))
+                guard !Task.isCancelled else { break }
+                idlePose.toggle()
+                try? await Task.sleep(for: .seconds(Double.random(in: 1.4...3.0)))
+                guard !Task.isCancelled else { break }
+                blinking = true
+                try? await Task.sleep(for: .milliseconds(140))
+                blinking = false
+            }
+            idleAnimationTask = nil
+        }
+    }
     private func scene(now: Date, phase: Double) -> some View {
         Group {
             if let title = model.taskTitle {
+                if let completion = model.taskCompletion {
+                    TaskCompletionView(result: completion, title: title, model: model)
+                } else {
                 VStack(spacing: 5) {
                     Text(title).font(.system(size: 14, weight: .semibold)).lineLimit(2).truncationMode(.tail)
                     Text(model.taskProgress ?? model.text("正在思考…")).font(.system(size: 12)).lineLimit(3).multilineTextAlignment(.center)
@@ -125,6 +162,9 @@ struct WidgetView: View {
                 .minimumScaleFactor(0.7).padding(.horizontal, 12)
                 .foregroundStyle(model.colorScope == .none ? AnyShapeStyle(ink) : style("ink", phase: phase))
                 .help([title, model.taskProgress ?? ""].filter { !$0.isEmpty }.joined(separator: "\n"))
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { model.openTaskConversation() }
+                }
             } else if let quote = displayedMessage {
                 Text(quote).font(.system(size: 24, weight: .bold)).multilineTextAlignment(.center)
                     .minimumScaleFactor(0.3).lineLimit(6).padding(.horizontal, 12)
@@ -238,7 +278,7 @@ struct WidgetView: View {
     }
 }
 
-private extension Color {
+extension Color {
     init(hex: String, role: String = "accent") {
         let value = UInt64(hex, radix: 16) ?? 0
         var components = [Double((value >> 16) & 255), Double((value >> 8) & 255), Double(value & 255)].map { $0 / 255 }

@@ -30,6 +30,9 @@ final class WidgetModel: ObservableObject {
     @Published var taskTitle: String?
     @Published var taskProgress: String?
     @Published var taskIsRunning = false
+    @Published var taskID: String?
+    @Published var taskCompletion: TaskCompletion?
+    @Published var lastEstimatedTotal: Double?
     @Published var hideMenu: Bool
     @Published var facingLeft = false
     var desktopNeedsMigration = false
@@ -43,6 +46,7 @@ final class WidgetModel: ObservableObject {
     let dataDirectory: URL
     let resources: URL
     let characterImage: NSImage?
+    let blinkImage: NSImage?
     let defaults: UserDefaults
     private var worker: Process?
     var workerRunning: Bool { worker?.isRunning == true }
@@ -61,11 +65,16 @@ final class WidgetModel: ObservableObject {
     private var refreshUntil = Date.distantPast
     private var lastStatusData: Data?
     private var lastChecked: Double?
+    private var measuredTurnKey: String?
+    private var quotaBaseline: (id: String, remaining: Double)?
+    private var measurementNote = "缺少轮次开始前的额度"
+    private var pendingEstimate: (baseline: (id: String, remaining: Double), finishedAt: Double, expires: Date)?
     private let logger = Logger(subsystem: "com.hydrogenhe.GPTNiangMac", category: "worker")
 
     init(dataDirectory: URL, resources: URL) {
         self.dataDirectory = dataDirectory; self.resources = resources
         characterImage = NSImage(contentsOf: resources.appendingPathComponent("gpt-dragon-niang-bust.png"))
+        blinkImage = NSImage(contentsOf: resources.appendingPathComponent("gpt-dragon-niang-bust-blink.png"))
         // Keep preferences together with quota state; no shared Codex config edits.
         let prefs = dataDirectory.appendingPathComponent("preferences.json")
         let values = (try? Data(contentsOf: prefs)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
@@ -103,6 +112,7 @@ final class WidgetModel: ObservableObject {
 
     func start() {
         startWorker()
+        tick()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
@@ -121,14 +131,22 @@ final class WidgetModel: ObservableObject {
             lastStatusData = nil; snapshot = UsageSnapshot(error: text("正在讀取目前帳戶的額度…"))
         }
         if Date() > refreshUntil { refreshing = false }
+        if let pending = pendingEstimate, Date() > pending.expires {
+            pendingEstimate = nil
+            if taskCompletion?.estimatedTotal == nil, taskCompletion?.after == nil {
+                taskCompletion?.estimateNote = text("额度未更新，暂无法估算")
+            }
+        }
         if worker?.isRunning != true { startWorker() }
     }
     func readSnapshot(_ data: Data) {
             if data != lastStatusData {
                 lastStatusData = data
                 snapshot = (try? JSONDecoder().decode(UsageSnapshot.self, from: data)) ?? UsageSnapshot(error: text("额度数据无法读取，请刷新。"))
-                let checked = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["checkedAt"] as? Double
+                let status = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let checked = status?["checkedAt"] as? Double
                 if checked != lastChecked { lastChecked = checked; refreshing = false }
+                updatePendingEstimate()
             }
     }
     private func startWorker() {
@@ -202,6 +220,7 @@ final class WidgetModel: ObservableObject {
         let opening = !bubble
         let switching = message != nil
         taskTitle = nil; taskProgress = nil
+        taskID = nil; taskCompletion = nil; pendingEstimate = nil
         message = nil; bubble = true
         updateAppearance()
         restartTTL(delay: opening ? 0.52 : switching ? 0.28 : 0)
@@ -217,41 +236,114 @@ final class WidgetModel: ObservableObject {
         let opening = !bubble
         loadQuotes()
         taskTitle = nil; taskProgress = nil
+        taskID = nil; taskCompletion = nil; pendingEstimate = nil
         message = QuoteFile.choose(quotes, excluding: lastQuote) ?? "我在這裡，慢慢來就好。"
         lastQuote = message; bubble = true
         updateAppearance()
         restartTTL(delay: opening ? 0.52 : 0.28)
     }
-    func showTaskProgress(title: String, progress: String?) {
+    func showTaskProgress(id: String, title: String, progress: String?) {
         guard taskNotificationsEnabled else { return }
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanTitle.isEmpty else { return }
         let boundedTitle = String(cleanTitle.prefix(120))
         let cleanProgress = progress?.trimmingCharacters(in: .whitespacesAndNewlines)
         let nextProgress = cleanProgress.map { $0.isEmpty ? text("正在思考…") : String($0.prefix(180)) } ?? text("正在思考…")
-        if taskIsRunning && taskTitle == boundedTitle && taskProgress == nextProgress { return }
+        if taskIsRunning && taskID == id && taskTitle == boundedTitle && taskProgress == nextProgress { return }
         taskIsRunning = true
+        taskID = id; taskCompletion = nil
         taskTitle = boundedTitle
         taskProgress = nextProgress
         message = nil; bubble = true; quoteGeneration += 1; sceneStarted = Date(); updateAppearance()
     }
-    func showTaskFinished(title: String, stopped: Bool = false) {
+    func showTaskFinished(id: String, title: String, stopped: Bool = false, tokens: Int? = nil, finishedAt: Double? = nil) {
         guard taskNotificationsEnabled else { return }
+        pendingEstimate = nil
         taskIsRunning = false
+        taskID = id
+        let end = finishedAt ?? Date().timeIntervalSince1970 * 1000
+        let baseline = quotaBaseline.flatMap { $0.id == id ? $0 : nil }
+        taskCompletion = TaskCompletion(id: id, finishedAt: end, stopped: stopped, tokens: tokens,
+            before: baseline?.remaining, estimateNote: text(baseline == nil ? measurementNote : "等待额度刷新…"))
+        if let baseline {
+            pendingEstimate = (baseline, end, Date().addingTimeInterval(25))
+            requestRefreshFlag()
+            for delay in [3.0, 7.0] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self, self.pendingEstimate?.finishedAt == end else { return }
+                    self.requestRefreshFlag()
+                }
+            }
+        }
         taskTitle = String(title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(120))
-        taskProgress = text(stopped ? "已停止" : "已完成")
+        taskProgress = tokens.map { text(stopped ? "已停止 · 本輪 %@ tokens" : "已完成 · 本輪 %@ tokens", NumberFormatter.localizedString(from: NSNumber(value: $0), number: .decimal)) } ?? text(stopped ? "已停止" : "已完成")
         message = nil; bubble = true; sceneStarted = Date(); updateAppearance(); play("release")
+        scheduleCompletionHide()
+        updatePendingEstimate()
+    }
+    private func scheduleCompletionHide() {
         quoteGeneration += 1
         let generation = quoteGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + 7) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
             guard let self, self.quoteGeneration == generation else { return }
             self.taskTitle = nil; self.taskProgress = nil; self.bubble = false; self.updateAppearance()
         }
+    }
+    func observeTaskActivity(_ rows: [ThreadSpeedRow]) {
+        let running = rows.filter { $0.state == "running" }
+        if let row = running.first {
+            let key = "\(row.id):\(row.turnStartedAt ?? -1)"
+            if key != measuredTurnKey {
+                measuredTurnKey = key; pendingEstimate = nil; quotaBaseline = nil
+                measurementNote = "缺少轮次开始前的额度"
+                if snapshot.ok, let window = snapshot.validWindows.first(where: { $0.minutes == 300 }) {
+                    quotaBaseline = (row.id, window.remaining)
+                }
+            }
+        }
+        // The final token checkpoint may arrive just after task_complete.
+        if let result = taskCompletion, result.tokens == nil,
+           let row = rows.first(where: { $0.id == result.id && $0.turnFinishedAt == result.finishedAt }),
+           let tokens = row.turnTokens {
+            taskCompletion?.tokens = tokens
+            updatePendingEstimate()
+        }
+    }
+    private func updatePendingEstimate() {
+        guard let pending = pendingEstimate, var result = taskCompletion,
+              result.id == pending.baseline.id else { return }
+        guard !snapshot.stale(at: Date()), let observed = snapshot.observedAt,
+              observed >= pending.finishedAt,
+              let after = snapshot.validWindows.first(where: { $0.minutes == 300 }) else { return }
+        let before = pending.baseline.remaining
+        result.before = before; result.after = after.remaining
+        if let tokens = result.tokens,
+           let estimate = FiveHourEstimate(tokens: tokens, before: before, after: after.remaining) {
+            result.estimatedTotal = estimate.totalTokens
+            result.previousEstimatedTotal = lastEstimatedTotal
+            result.estimateNote = text("估算 5 小时总量")
+            lastEstimatedTotal = estimate.totalTokens
+            pendingEstimate = nil
+        } else {
+            result.estimateNote = text(result.tokens == nil ? "本轮 token 未记录，暂无法估算" : "额度未下降，暂无法估算")
+        }
+        taskCompletion = result
+        if bubble && taskTitle != nil && result.estimatedTotal != nil { scheduleCompletionHide() }
+    }
+    func openTaskConversation() {
+        guard let id = taskID, UUID(uuidString: id) != nil,
+              let url = URL(string: "codex://threads/\(id)") else { return }
+        if !NSWorkspace.shared.open(url) { settingsError = text("无法打开对应对话，请确认 Codex 已安装。") }
+    }
+    func clickTaskBubble() {
+        if taskTitle != nil && taskID != nil { openTaskConversation() }
+        else { clickBubble() }
     }
     func taskNotificationsChanged(_ enabled: Bool) {
         taskNotificationsEnabled = enabled
         if !enabled {
             taskIsRunning = false; taskTitle = nil; taskProgress = nil
+            taskID = nil; taskCompletion = nil; quotaBaseline = nil; pendingEstimate = nil; measuredTurnKey = nil
         }
         savePreferences()
     }

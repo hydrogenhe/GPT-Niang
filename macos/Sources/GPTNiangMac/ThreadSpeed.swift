@@ -9,6 +9,9 @@ struct ThreadSpeedRow: Decodable, Identifiable {
     let sampleAt: Double?
     let state: String
     let progress: String?
+    let turnTokens: Int?
+    let turnStartedAt: Double?
+    let turnFinishedAt: Double?
     let outputTokens: Int?
     let intervalSeconds: Double?
 }

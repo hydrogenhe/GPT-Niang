@@ -184,20 +184,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         speedWindow?.makeKeyAndOrderFront(nil)
     }
     private func syncTaskActivity(_ rows: [ThreadSpeedRow]) {
+        model.observeTaskActivity(rows)
         let running = rows.filter { $0.state == "running" }
         let runningIDs = Set(running.map(\.id))
         guard let previousIDs = observedRunningTaskIDs else {
             observedRunningTaskIDs = runningIDs
             hasTaskActivityBaseline = true
-            if let current = running.first { model.showTaskProgress(title: current.title, progress: current.progress) }
+            if let current = running.first { model.showTaskProgress(id: current.id, title: current.title, progress: current.progress) }
             return
         }
         if !running.isEmpty, let current = running.first {
-            model.showTaskProgress(title: current.title, progress: current.progress)
+            model.showTaskProgress(id: current.id, title: current.title, progress: current.progress)
         } else {
             let finishedIDs = previousIDs.subtracting(runningIDs)
             if let finished = rows.first(where: { finishedIDs.contains($0.id) && ["completed", "aborted"].contains($0.state) }) {
-                model.showTaskFinished(title: finished.title, stopped: finished.state == "aborted")
+                model.showTaskFinished(id: finished.id, title: finished.title, stopped: finished.state == "aborted", tokens: finished.turnTokens, finishedAt: finished.turnFinishedAt)
             }
         }
         observedRunningTaskIDs = runningIDs
